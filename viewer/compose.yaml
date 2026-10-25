@@ -1,0 +1,19 @@
+# Run on the Gateway host:
+#   docker compose -f viewer/compose.yaml --env-file ~/.config/seecode-viewer/compose.env -p seecode-viewer up -d
+# compose.env sets SEECODE_TAG (the pinned fork commit, sha7), UID, GID, REPOS_DIR,
+# BOARDS_FILE and DATA_DIR. Repos are fetched on the host; the container only reads them.
+services:
+  viewer:
+    image: ghcr.io/tomorrowflow/seecode:${SEECODE_TAG:?set SEECODE_TAG}
+    build: ..
+    user: "${UID:-1000}:${GID:-1000}"
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${PORT:-17318}:17318"
+    environment:
+      SEECODE_RESCAN: ${SEECODE_RESCAN:-120}
+      SEECODE_ALLOW_HOSTS: ${SEECODE_ALLOW_HOSTS:-localhost}
+    volumes:
+      - ${REPOS_DIR:?set REPOS_DIR}:/repos:ro
+      - ${BOARDS_FILE:?set BOARDS_FILE}:/config/boards.json:ro
+      - ${DATA_DIR:?set DATA_DIR}:/data

@@ -1,0 +1,40 @@
+name: Fork viewer
+# Tests the architecture viewer, then publishes its image tagged by commit
+# (ghcr.io/tomorrowflow/seecode:<sha7>), so the factory pins one commit for
+# both the node skill and the viewer.
+on:
+  pull_request:
+    paths: ['viewer/**', 'skills/seecode/**', 'Dockerfile', '.dockerignore', '.github/workflows/fork-viewer.yml']
+  push:
+    branches: [main]
+    paths: ['viewer/**', 'skills/seecode/**', 'Dockerfile', '.dockerignore', '.github/workflows/fork-viewer.yml']
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node --test viewer/test/*.test.mjs
+
+  image:
+    needs: test
+    if: github.event_name == 'push' && github.repository == 'tomorrowflow/SeeCode'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        run: |
+          tag="ghcr.io/tomorrowflow/seecode:${GITHUB_SHA::7}"
+          docker build -t "$tag" .
+          docker push "$tag"
