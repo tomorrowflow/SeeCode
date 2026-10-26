@@ -47,10 +47,11 @@ async function serve(handler) {
 
 test('parseBoards defaults and rejects unsafe config', () => {
   const [b] = parseBoards('{"voice-diary":{"repo":"/repos/vd","github":"tomorrowflow/voice-diary"}}');
-  assert.deepEqual(b, { id: 'voice-diary', repo: '/repos/vd', ref: 'origin/HEAD', specDir: 'docs/architecture', github: 'tomorrowflow/voice-diary' });
+  assert.deepEqual(b, { id: 'voice-diary', repo: '/repos/vd', ref: 'origin/HEAD', specDir: 'docs/architecture', github: 'tomorrowflow/voice-diary', driftIgnore: [] });
   assert.throws(() => parseBoards('{"x":{"repo":"/r","specDir":"../etc"}}'), /bad specDir/);
   assert.throws(() => parseBoards('{"../x":{"repo":"/r"}}'), /board id/);
   assert.throws(() => parseBoards('[]'), /object keyed/);
+  assert.throws(() => parseBoards('{"x":{"repo":"/r","driftIgnore":"docs"}}'), /driftIgnore/);
 });
 
 test('renders the ref, keeps the last good map when a newer commit breaks, and serves it', async () => {

@@ -18,12 +18,14 @@ export function parseBoards(json) {
     const specDir = String(b.specDir ?? 'docs/architecture').replace(/^\/+|\/+$/g, '');
     if (!specDir || specDir.split('/').some((p) => p === '..' || p === '.')) throw new Error(`board ${id} has a bad specDir`);
     if (b.github !== undefined && !/^[\w.-]+\/[\w.-]+$/.test(b.github)) throw new Error(`board ${id} github must be owner/name`);
-    return { id, repo: b.repo, ref: b.ref ?? 'origin/HEAD', specDir, github: b.github };
+    const driftIgnore = b.driftIgnore ?? [];
+    if (!Array.isArray(driftIgnore) || driftIgnore.some((x) => typeof x !== 'string' || !x)) throw new Error(`board ${id} driftIgnore must be a list of names or paths`);
+    return { id, repo: b.repo, ref: b.ref ?? 'origin/HEAD', specDir, github: b.github, driftIgnore };
   });
 }
 
 // The clone is mounted read-only and owned by another uid, hence safe.directory.
-function git(repo, args, encoding = 'utf8') {
+export function git(repo, args, encoding = 'utf8') {
   const r = spawnSync('git', ['-c', 'safe.directory=*', '-C', repo, ...args], { encoding, maxBuffer: 256 << 20 });
   if (r.status !== 0) throw new Error(`git ${args[0]}: ${String(r.stderr || r.error || '').trim()}`);
   return r.stdout;
