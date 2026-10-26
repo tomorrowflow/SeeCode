@@ -1,9 +1,12 @@
 // Serves each board's rendered map: /board/<id>/ is SeeCode's index with a
-// status header, /board/<id>/<name>.html a diagram whose evidence entries link
-// to the code on GitHub, /board/<id>/drift.json the latest drift report.
+// status header and commit picker, /board/<id>/<name>.html a diagram whose
+// evidence entries link to the code on GitHub, /board/<id>/at/<sha>/ the map at
+// a past spec commit, /board/<id>/delta what changed between two commits, and
+// /board/<id>/drift.json the latest drift report.
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { readState, servedDir, hasMap } from './boards.mjs';
+import { readState, servedDir, hasMap, specHistory, renderedAt, git } from './boards.mjs';
+import { deltaReport } from './delta.mjs';
 
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const FILE = /^[\w.-]+\.(html|json)$/;
@@ -30,11 +33,60 @@ function driftLine(dataDir, id) {
   } catch { return ''; }
 }
 
-function header(board, dataDir, state) {
-  const sha = state.commit;
-  const commit = board.github ? `<a href="https://github.com/${esc(board.github)}/commit/${esc(sha)}" target="_blank" rel="noopener"><code>${esc(sha.slice(0, 7))}</code></a>` : `<code>${esc(sha.slice(0, 7))}</code>`;
-  const parts = [`<b>${esc(board.id)}</b>`, `${commit} rendered ${esc(when(state.renderedAt))}`, driftLine(dataDir, board.id), errorLine(state)].filter(Boolean);
-  return `<div style="font:13px/1.5 system-ui,sans-serif;padding:10px 16px;border-bottom:1px solid var(--sc-rule,#ddd);display:flex;flex-wrap:wrap;gap:6px 18px;color:var(--sc-muted,#555)"><a href="/">All boards</a>${parts.map((p) => `<span>${p}</span>`).join('')}</div>`;
+const commitLink = (board, sha) => (board.github
+  ? `<a href="https://github.com/${esc(board.github)}/commit/${esc(sha)}" target="_blank" rel="noopener"><code>${esc(sha.slice(0, 7))}</code></a>`
+  : `<code>${esc(sha.slice(0, 7))}</code>`);
+
+// Lists the latest map and every past spec commit; picking one navigates to it.
+function picker(board, history, at) {
+  const base = `/board/${encodeURIComponent(board.id)}/`;
+  const options = [`<option value="${base}"${at ? '' : ' selected'}>Latest map</option>`, ...history.map((c) => `<option value="${base}at/${c.commit}/"${c.commit === at ? ' selected' : ''}>${esc(c.date.slice(0, 10))} ${esc(c.commit.slice(0, 7))} ${esc(c.subject.slice(0, 60))}</option>`)];
+  return `<select aria-label="Map version" onchange="location.href=this.value" style="font:inherit;max-width:22em">${options.join('')}</select>`;
+}
+
+function header(board, dataDir, state, at) {
+  const history = specHistory(board);
+  const parts = at
+    ? [`<b>${esc(board.id)}</b>`, picker(board, history, at.commit), `<span style="color:#b26a00">Older map from ${esc(at.date.slice(0, 10))} (${commitLink(board, at.commit)}). <a href="/board/${encodeURIComponent(board.id)}/">Back to the latest</a></span>`, `<a href="/board/${encodeURIComponent(board.id)}/delta?to=${at.commit}">What changed here</a>`]
+    : [`<b>${esc(board.id)}</b>`, picker(board, history, null), `${commitLink(board, state.commit)} rendered ${esc(when(state.renderedAt))}`, history.length ? '<a href="delta">What changed last</a>' : '', driftLine(dataDir, board.id), errorLine(state)];
+  return `<div style="font:13px/1.5 system-ui,sans-serif;padding:10px 16px;border-bottom:1px solid var(--sc-rule,#ddd);display:flex;flex-wrap:wrap;align-items:center;gap:6px 18px;color:var(--sc-muted,#555)"><a href="/">All boards</a>${parts.filter(Boolean).map((p) => `<span>${p}</span>`).join('')}</div>`;
+}
+
+const SHA = /^[0-9a-f]{7,40}$/;
+
+// The default range is the newest spec change up to the target commit.
+function deltaRange(board, url, state) {
+  const q = url.searchParams;
+  for (const k of ['from', 'to']) if (q.has(k) && !SHA.test(q.get(k))) return null;
+  const to = q.get('to') || state.commit;
+  if (!to) return null;
+  if (q.has('from')) return { from: q.get('from'), to };
+  const newest = git(board.repo, ['log', '-1', '--format=%H %P', to, '--', board.specDir]).trim().split(' ');
+  return { from: newest[1] || undefined, to };
+}
+
+const list = (items, fmt) => (items.length ? `<ul>${items.map((x) => `<li>${fmt(x)}</li>`).join('')}</ul>` : '');
+
+function deltaPage(board, d) {
+  const range = `${d.from ? `<code>${esc(d.from.commit.slice(0, 7))}</code>` : 'the start'} to <code>${esc(d.to.commit.slice(0, 7))}</code>`;
+  const commits = list(d.specCommits, (c) => `${commitLink(board, c.commit)} ${esc(c.date.slice(0, 10))} ${esc(c.subject)} · <a href="at/${c.commit}/">map</a>`);
+  const specs = d.specs.map((s) => {
+    if (s.status !== 'changed') return `<h2>${esc(s.spec)}: ${esc(s.status)}</h2>${s.status === 'added' ? `<p>${s.nodes} nodes, ${s.edges} edges.</p>` : ''}`;
+    const n = s.nodes;
+    const e = s.edges;
+    const v = s.evidence;
+    return `<h2>${esc(s.spec)}</h2>${[
+      list(n.added, (x) => `node added: <b>${esc(x.label ?? x.id)}</b> <code>${esc(x.id)}</code>`),
+      list(n.removed, (x) => `node removed: <b>${esc(x.label ?? x.id)}</b> <code>${esc(x.id)}</code>`),
+      list(n.changed, (x) => `node <code>${esc(x.id)}</code>: ${Object.entries(x.fields).map(([f, [a, b]]) => `${esc(f)} “${esc(a ?? '')}” → “${esc(b ?? '')}”`).join(', ')}`),
+      list(n.moved, (x) => `node <code>${esc(x.id)}</code> moved`),
+      list(e.added, (x) => `edge added: <code>${esc(x.edge)}</code> ${esc(x.label ?? '')}`),
+      list(e.removed, (x) => `edge removed: <code>${esc(x.edge)}</code> ${esc(x.label ?? '')}`),
+      list(e.changed, (x) => `edge <code>${esc(x.edge)}</code>: “${esc(x.label[0] ?? '')}” → “${esc(x.label[1] ?? '')}”`),
+      list([...v.added.map((x) => ['added', x]), ...v.removed.map((x) => ['removed', x]), ...v.moved.map((x) => ['moved', x])], ([k, x]) => `evidence ${k}: <code>${esc(x.id)}</code> <code>${esc(x.file)}:${esc(Array.isArray(x.line) ? x.line.join('→') : x.line)}</code>`),
+    ].join('')}`;
+  }).join('');
+  return page(`${board.id} delta`, `<p><a href="./">Back to the map</a> · <a href="delta.json?${d.from ? `from=${d.from.commit}&amp;` : ''}to=${d.to.commit}">JSON</a></p><h1>${esc(board.id)}: what changed</h1><p>From ${range}: ${esc(d.summary.text)}</p>${commits}${specs}`);
 }
 
 // Turns each "file:line" in the Sources list into a link to that line at the served commit.
@@ -70,6 +122,20 @@ export function createHandler({ boards, dataDir, allowHosts }) {
     if (!m[2]) return send(301, '', TYPES.html, { location: `/board/${encodeURIComponent(board.id)}/` });
 
     const name = m[3] || 'index.html';
+    if (name === 'delta' || name === 'delta.json') {
+      const range = deltaRange(board, new URL(req.url, 'http://x'), readState(dataDir, board.id));
+      if (!range) return send(400, page('Bad range', '<p>from and to must be commit shas.</p>'));
+      let d;
+      try { d = deltaReport(board, range); } catch { return send(404, page('Not found', '<p>Unknown commit.</p>')); }
+      return name === 'delta.json' ? send(200, `${JSON.stringify(d, null, 2)}\n`, TYPES.json) : send(200, deltaPage(board, d));
+    }
+    const at = /^at\/([0-9a-f]{40})\/(.*)$/.exec(name);
+    if (at) {
+      const dir = renderedAt(board, dataDir, at[1]);
+      const file = at[2] || 'index.html';
+      if (!dir || !FILE.test(file) || !existsSync(join(dir, file))) return send(404, page('Not found', '<p>No map at that commit. <a href="/">All boards</a></p>'));
+      return sendMap(file, join(dir, file), at[1], () => header(board, dataDir, {}, specHistory(board).find((c) => c.commit === at[1])));
+    }
     if (name === 'drift.json') {
       const p = join(dataDir, board.id, 'drift.json');
       return existsSync(p) ? send(200, readFileSync(p), TYPES.json) : send(404, '{"error":"no drift report yet"}\n', TYPES.json);
@@ -82,11 +148,15 @@ export function createHandler({ boards, dataDir, allowHosts }) {
     if (!FILE.test(name)) return send(404, page('Not found', '<p>Not found.</p>'));
     const file = join(servedDir(board, dataDir, state), name);
     if (!existsSync(file)) return send(404, page('Not found', '<p>Not found.</p>'));
-    const type = name.split('.').pop();
-    if (type !== 'html') return send(200, readFileSync(file), TYPES[type]);
-    let html = readFileSync(file, 'utf8');
-    if (name === 'index.html') html = injectAfterBody(html, header(board, dataDir, state));
-    else if (board.github) html = injectBeforeBodyEnd(html, evidenceLinks(board.github, state.commit));
-    return send(200, html);
+    return sendMap(name, file, state.commit, () => header(board, dataDir, state, null));
+
+    function sendMap(fileName, file, sha, makeHeader) {
+      const type = fileName.split('.').pop();
+      if (type !== 'html') return send(200, readFileSync(file), TYPES[type]);
+      let html = readFileSync(file, 'utf8');
+      if (fileName === 'index.html') html = injectAfterBody(html, makeHeader());
+      else if (board.github) html = injectBeforeBodyEnd(html, evidenceLinks(board.github, sha));
+      return send(200, html);
+    }
   };
 }
