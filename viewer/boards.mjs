@@ -2,7 +2,7 @@
 // keeps serving its last good render while a newer commit fails, and its state
 // survives restarts in <data>/<board>/state.json.
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -46,6 +46,36 @@ function saveState(dataDir, id, state) {
 // The folder a board's pages are served from, or null before its first render.
 export function servedDir(board, dataDir, state) {
   return state.commit ? join(dataDir, board.id, state.commit, board.specDir) : null;
+}
+
+// The commits on the board's ref that changed its specs, newest first.
+export function specHistory(board, limit = 100) {
+  const out = git(board.repo, ['log', `-${limit}`, '--format=%H%x09%cI%x09%s', board.ref, '--', board.specDir]);
+  return out.split('\n').filter(Boolean).map((l) => {
+    const [commit, date, ...subject] = l.split('\t');
+    return { commit, date, subject: subject.join('\t') };
+  });
+}
+
+const AT_CACHE = 20;
+
+// The folder a past spec commit is served from, rendered on first request and
+// cached under <data>/<id>/at/; only commits in specHistory are accepted.
+export function renderedAt(board, dataDir, sha) {
+  if (!specHistory(board).some((c) => c.commit === sha)) return null;
+  const atDir = join(dataDir, board.id, 'at');
+  const root = join(atDir, sha);
+  const dir = join(root, board.specDir);
+  if (existsSync(join(dir, 'index.html'))) return dir;
+  try {
+    exportTree(board, sha, root);
+  } catch {
+    return null; // a commit that removed the spec folder
+  }
+  render(dir, root);
+  const cached = readdirSync(atDir).map((name) => ({ name, t: statSync(join(atDir, name)).mtimeMs })).sort((a, b) => b.t - a.t);
+  for (const { name } of cached.slice(AT_CACHE)) rmSync(join(atDir, name), { recursive: true, force: true });
+  return existsSync(join(dir, 'index.html')) ? dir : null;
 }
 
 function exportTree(board, sha, root) {
@@ -93,7 +123,7 @@ export function refreshBoard(board, dataDir, now = Date.now()) {
     ? { commit: sha, renderedAt: now, warnings: problemsOf(result), error: failure }
     : { ...state, error: failure };
   for (const d of readdirSync(join(dataDir, board.id), { withFileTypes: true })) {
-    if (d.isDirectory() && d.name !== next.commit) rmSync(join(dataDir, board.id, d.name), { recursive: true, force: true });
+    if (d.isDirectory() && d.name !== next.commit && d.name !== 'at') rmSync(join(dataDir, board.id, d.name), { recursive: true, force: true });
   }
   return saveState(dataDir, board.id, next);
 }
