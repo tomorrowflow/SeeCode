@@ -152,7 +152,12 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     process.exit(2);
   }
   const dataDir = process.env.SEECODE_DATA || '/data';
-  const report = driftReport(board, dataDir);
-  writeReport(dataDir, board.id, report);
-  console.log(JSON.stringify(report));
+  try {
+    const report = driftReport(board, dataDir);
+    writeReport(dataDir, board.id, report);
+    console.log(JSON.stringify(report));
+  } catch (e) {
+    console.error(`drift ${board.id}: ${e.message}`);
+    process.exit(1);
+  }
 }
